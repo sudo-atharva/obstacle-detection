@@ -19,7 +19,8 @@ from PIL import Image, ImageTk
 
 from controller import Config, Level, ObstacleController, State
 from detector import ObstacleDetector, draw_overlay
-from vehicle import SimulatedVehicle
+from esp32_link import Esp32Link, Esp32Panel
+from vehicle import Esp32Vehicle
 
 VIDEO_W, VIDEO_H = 760, 570
 CAMERA_LOST_AFTER = 1.0  # seconds without a frame before stopping for safety
@@ -59,13 +60,16 @@ class CameraWorker(threading.Thread):
 
 
 class ObstacleApp:
-    def __init__(self, root, source, sim, backend, config):
+    def __init__(self, root, source, sim, backend, config, port=""):
         self.root = root
         root.title("Obstacle Detection - Pilot Assist")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.controller = ObstacleController(config)
-        self.vehicle = SimulatedVehicle()
+        self.esp32 = Esp32Link()
+        self.esp32_was_connected = False
+        self.port = port
+        self.vehicle = Esp32Vehicle(self.esp32)  # only sends while an ESP32 is connected
         self.frames = queue.Queue(maxsize=1)
         self.camera_level = Level.CLEAR
         self.last_frame_time = time.monotonic()
@@ -143,8 +147,11 @@ class ObstacleApp:
         ttk.Label(settings, text="Pilot answer timeout (s):").pack(side="left")
         ttk.Spinbox(settings, from_=1, to=30, increment=1, width=5, textvariable=self.timeout_var).pack(side="left")
 
+        self.esp32_panel = Esp32Panel(side, self.esp32, self.port)
+        self.esp32_panel.pack(fill="x", pady=(0, 8))
+
         ttk.Label(side, text="Event log").pack(anchor="w")
-        self.log_box = tk.Listbox(side, height=8, font=("Courier", 9))
+        self.log_box = tk.Listbox(side, height=6, font=("Courier", 9))
         self.log_box.pack(fill="both", expand=True)
 
     # ---- pilot actions -------------------------------------------------
@@ -181,6 +188,12 @@ class ObstacleApp:
             if time.monotonic() - self.last_frame_time > CAMERA_LOST_AFTER:
                 self.controller.emergency_stop("Camera feed lost")
                 self.show(self._placeholder("NO CAMERA SIGNAL"))
+
+        # Losing the ESP32 mid-drive: its own watchdog stops the motors; mirror that here.
+        if self.esp32_was_connected and not self.esp32.connected:
+            self.controller.emergency_stop("ESP32 disconnected")
+        self.esp32_was_connected = self.esp32.connected
+        self.esp32_panel.update_status()
 
         speed = self.controller.update(level)
         self.vehicle.set_speed(speed)
@@ -259,6 +272,7 @@ class ObstacleApp:
 
     def on_close(self):
         self.vehicle.stop()
+        self.esp32.close()
         if self.worker:
             self.worker.running = False
             self.worker.join(timeout=2)
@@ -271,6 +285,7 @@ def main():
     parser.add_argument("--sim", action="store_true", help="no camera; place obstacles from the GUI")
     parser.add_argument("--detector", choices=["auto", "yolo", "edges"], default="auto")
     parser.add_argument("--timeout", type=float, default=5.0, help="seconds the pilot has to answer")
+    parser.add_argument("--port", default="", help="ESP32 serial port to connect at startup, e.g. COM3")
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
@@ -278,7 +293,7 @@ def main():
     with open(pid_file, "w") as f:
         f.write(str(os.getpid()))  # lets stop.bat find this process
     root = tk.Tk()
-    ObstacleApp(root, source, args.sim, args.detector, Config(pilot_timeout=args.timeout))
+    ObstacleApp(root, source, args.sim, args.detector, Config(pilot_timeout=args.timeout), args.port)
     try:
         root.mainloop()
     finally:

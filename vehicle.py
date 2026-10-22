@@ -1,4 +1,5 @@
-"""Vehicle interface. Replace SimulatedVehicle with code that drives your real motors."""
+"""Vehicle interface: the app calls set_speed() about 20 times per second."""
+import time
 
 
 class Vehicle:
@@ -18,20 +19,26 @@ class SimulatedVehicle(Vehicle):
         self.speed = speed
 
 
-class SerialVehicle(Vehicle):
-    """Example for an Arduino or other motor controller on a serial port.
+class Esp32Vehicle(Vehicle):
+    """Drives the motors through an ESP32 + L293D (firmware in firmware/obstacle_esp32).
 
-    Sends lines like "S0.30\\n"; write the matching parser in your firmware.
-    Requires: pip install pyserial
+    Sends lines like "S0.30". The command is repeated at least every KEEPALIVE seconds,
+    because the firmware stops the motors if it hears nothing for 0.5 s (app crashed,
+    cable unplugged...).
     """
 
-    def __init__(self, port="/dev/ttyUSB0", baud=115200):
-        import serial
-        self.conn = serial.Serial(port, baud, timeout=0.1)
-        self._last = None
+    KEEPALIVE = 0.2
+
+    def __init__(self, link):
+        self.link = link  # esp32_link.Esp32Link
+        self.speed = 0.0
+        self._last = (None, 0.0)
 
     def set_speed(self, speed):
-        speed = round(speed, 2)
-        if speed != self._last:  # only send when the speed changes
-            self.conn.write(f"S{speed:.2f}\n".encode())
-            self._last = speed
+        self.speed = speed
+        command = f"S{speed:.2f}"
+        last_command, last_time = self._last
+        now = time.monotonic()
+        if command != last_command or now - last_time >= self.KEEPALIVE:
+            if self.link.send(command):
+                self._last = (command, now)
